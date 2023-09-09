@@ -1,8 +1,11 @@
-import os, cv2, numpy, subprocess, tqdm, glob, sys
+import os, cv2, numpy, subprocess, tqdm, glob, sys, math
 import pickle as pkl 
 from scipy import signal
 from scipy.io import wavfile
 from TalkNet.talkNet import talkNet
+from src.local_utils import writeToPickleFile
+import python_speech_features
+import torch
 
 class TalkNetWrapper():
 	def __init__(self, videoPath, cacheDir):
@@ -12,6 +15,10 @@ class TalkNetWrapper():
 		self.audioFilePath = os.path.join(self.cacheDir, 'audio.wav')
 		self.nDataLoaderThread = 10
 		self.pretrainModel = '../TalkNet/pretrain_TalkSet.model'
+		if os.path.isfile(self.pretrainModel) == False: # Download the pretrained model
+			Link = "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea"
+			cmd = "gdown --id %s -O %s"%(Link, self.pretrainModel)
+			subprocess.call(cmd, shell=True, stdout=None)
 
 	def readFaceTracks(self):
 		faceTracksFile = os.path.join(self.cacheDir, 'face_retinaFace.pkl')
@@ -26,7 +33,7 @@ class TalkNetWrapper():
 				x2 = int(round(box[3]*self.framesObj['width']))
 				y2 = int(round(box[4]*self.framesObj['height']))
 				boxes.append([x1, y1, x2, y2])
-			allTracks.append({'frame':frameNums, 'bbox':boxes})
+			allTracks.append({'frame':frameNums, 'bbox':boxes, 'trackId': faceTrackId})
 		return allTracks
 
 	def crop_video(self, track, cropFile):
@@ -52,7 +59,13 @@ class TalkNetWrapper():
 			my  = dets['y'][fidx] + bsi  # BBox center Y
 			mx  = dets['x'][fidx] + bsi  # BBox center X
 			face = frame[int(my-bs):int(my+bs*(1+2*cs)),int(mx-bs*(1+cs)):int(mx+bs*(1+cs))]
-			vOut.write(cv2.resize(face, (224, 224)))
+			if (int(my+bs*(1+2*cs)) - int(my-bs) > 0) and (int(mx+bs*(1+cs)) - int(mx-bs*(1+cs)) > 0):
+				out_face = face
+			else:
+				continue
+			vOut.write(cv2.resize(out_face, (224, 224)))
+		
+		assert self.framesObj['fps'] == 25, f'fps is not 25 but {self.framesObj["fps"]}'
 		audioTmp = f'{cropFile}.wav'
 		audioStart  = (track['frame'][0]) / self.framesObj['fps']
 		audioEnd    = (track['frame'][-1]+1) / self.framesObj['fps']
@@ -62,21 +75,21 @@ class TalkNetWrapper():
 						(self.audioFilePath, self.nDataLoaderThread, audioStart, audioEnd, audioTmp))
 		output = subprocess.call(command, shell=True, stdout=None) # Crop audio file
 		_, audio = wavfile.read(audioTmp)
-		command = ("ffmpeg -y -nostdin -i %st.avi -i %s -threads %d -c:v copy -c:a copy %stt.avi -loglevel panic" % \
+		command = ("ffmpeg -y -nostdin -i %st.avi -i %s -threads %d -c:v copy -c:a copy %s.avi -loglevel panic" % \
 						(cropFile, audioTmp, self.nDataLoaderThread, cropFile)) # Combine audio and video file
 		output = subprocess.call(command, shell=True, stdout=None)
 		os.remove(f'{cropFile}t.avi')
 		# convert to 25fps
-		command = f'ffmpeg -y -nostdin -loglevel panic -i {cropFile}tt.avi -filter:v fps=25 {cropFile}.avi'
-		output = subprocess.call(command, shell=True, stdout=None)
-		os.remove(f'{cropFile}tt.avi')
-		#extract the audio file from 25fps
-		command = f'ffmpeg -y -nostdin -loglevel error -i {cropFile}.avi \
-                -ar 16k -ac 1 {cropFile}.wav'
-		output = subprocess.call(command, shell=True, stdout=None)
-		return {'track':track, 'proc_track':dets}
+		# command = f'ffmpeg -y -nostdin -loglevel panic -i {cropFile}tt.avi -filter:v fps=25 {cropFile}.avi'
+		# output = subprocess.call(command, shell=True, stdout=None)
+		# os.remove(f'{cropFile}tt.avi')
+		# #extract the audio file from 25fps
+		# command = f'ffmpeg -y -nostdin -loglevel error -i {cropFile}.avi \
+        #         -ar 16k -ac 1 {cropFile}.wav'
+		# output = subprocess.call(command, shell=True, stdout=None)
+		return {'trackId': cropFile, 'track':track, 'proc_track':dets}
 
-	def evaluate_network(self, files, args):
+	def evaluate_network(self, files):
 		# GPU: active speaker detection by pretrained TalkNet
 		s = talkNet()
 		s.loadParameters(self.pretrainModel)
@@ -86,10 +99,10 @@ class TalkNetWrapper():
 		# durationSet = {1,2,4,6} # To make the result more reliable
 		durationSet = {1,1,1,2,2,2,3,3,4,5,6} # Use this line can get more reliable result
 		for file in tqdm.tqdm(files, total = len(files)):
-			fileName = os.path.splitext(file.split('/')[-1])[0] # Load audio and video
-			_, audio = wavfile.read(os.path.join(args.pycropPath, fileName + '.wav'))
+			audioPath = file + '.wav' # Load audio and video
+			_, audio = wavfile.read(audioPath)
 			audioFeature = python_speech_features.mfcc(audio, 16000, numcep = 13, winlen = 0.025, winstep = 0.010)
-			video = cv2.VideoCapture(os.path.join(args.pycropPath, fileName + '.avi'))
+			video = cv2.VideoCapture(file + '.avi')
 			videoFeature = []
 			while video.isOpened():
 				ret, frames = video.read()
@@ -124,7 +137,56 @@ class TalkNetWrapper():
 			allScores.append(allScore)	
 		return allScores
 
+	def visualization(self, tracks, scores):
+		# CPU: visulize the result for video format
+		flist = self.framesObj['frames']
+		faces = [[] for i in range(len(flist))]
+		for tidx, track in enumerate(tracks):
+			score = scores[tidx]
+			for fidx, frame in enumerate(track['track']['frame']):
+				s = score[max(fidx - 2, 0): min(fidx + 3, len(score) - 1)] # average smoothing
+				s = numpy.mean(s)
+				faces[frame].append({'track':tidx, 'score':float(s),'s':track['proc_track']['s'][fidx], 'x':track['proc_track']['x'][fidx], 'y':track['proc_track']['y'][fidx]})
+		# firstImage = cv2.imread(flist[0])
+		fw = self.framesObj['width']
+		fh = self.framesObj['height']
+		vOut = cv2.VideoWriter(os.path.join(self.cacheDir, 'talknet_video_only.avi'), cv2.VideoWriter_fourcc(*'XVID'), 25, (fw,fh))
+		colorDict = {0: 0, 1: 255}
+		for fidx, fname in tqdm.tqdm(enumerate(flist), total = len(flist)):
+			image = fname
+			for face in faces[fidx]:
+				box = [int(face['x']-face['s'])/fw, int(face['y']-face['s'])/fh,\
+						int(face['x']+face['s'])/fw, int(face['y']+face['s'])/fh]
+				clr = colorDict[int((face['score'] >= 0))]
+				txt = round(face['score'], 1)
+				cv2.rectangle(image, (int(face['x']-face['s']), int(face['y']-face['s'])), (int(face['x']+face['s']), int(face['y']+face['s'])),(0,clr,255-clr),10)
+				cv2.putText(image,'%s'%(txt), (int(face['x']-face['s']), int(face['y']-face['s'])), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,clr,255-clr),5)
+			vOut.write(image)
+		vOut.release()
+		command = ("ffmpeg -y -i %s -i %s -threads %d -c:v copy -c:a copy %s -loglevel panic" % \
+			(os.path.join(self.cacheDir, 'talknet_video_only.avi'), os.path.join(self.cacheDir, 'audio.wav'), \
+			self.nDataLoaderThread, os.path.join(self.cacheDir,'talknet_video_out.avi'))) 
+		output = subprocess.call(command, shell=True, stdout=None)
+
+	def faceWiseScores(self, tracks, scores):
+		faceScores = {}
+		for tidx, track in enumerate(tracks):
+			score = scores[tidx]
+			track_scores = []
+			for fidx, frame in enumerate(track['track']['frame']):
+				s = score[max(fidx - 2, 0): min(fidx + 3, len(score) - 1)] # average smoothing
+				s = numpy.mean(s)
+				track_scores.append(s)
+			faceScores[track['trackId']] = track_scores
+		return faceScores
+
+
 	def run(self):
+		talknetScoresFile = os.path.join(self.cacheDir, 'talknet_scores.pkl')
+		if os.path.isfile(talknetScoresFile):
+			print('reading talknet scores from cache')
+			return pkl.load(open(talknetScoresFile, 'rb'))
+	
 		frameFilePath = os.path.join(self.cacheDir, 'frames.pkl')
 		self.framesObj = pkl.load(open(frameFilePath, 'rb'))
 		faceCropDir = os.path.join(self.cacheDir, 'face_crop_videos')
@@ -133,11 +195,15 @@ class TalkNetWrapper():
 		vidTracks = [
 			self.crop_video(
 				track,
-				os.path.join(faceCropDir, '%05d' % ii),
+				os.path.join(faceCropDir, track['trackId']),
 			)
-			for ii, track in tqdm.tqdm(enumerate(allTracks), total=len(allTracks))
+			for ii, track in tqdm.tqdm(enumerate(allTracks), total=len(allTracks), desc='video crops for TalkNet')
 		]
-
-		files = glob.glob(f'{faceCropDir}/*.avi')
-		files.sort()
+		files = [os.path.join(track['trackId']) for track in vidTracks]
+		scores = self.evaluate_network(files)
+		scores = self.faceWiseScores(vidTracks, scores)
+		writeToPickleFile(scores, talknetScoresFile)
+		# self.visualization(vidTracks, scores)
+		return scores	
+		
 
