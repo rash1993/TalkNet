@@ -87,7 +87,7 @@ class TalkNetWrapper():
 		# command = f'ffmpeg -y -nostdin -loglevel error -i {cropFile}.avi \
         #         -ar 16k -ac 1 {cropFile}.wav'
 		# output = subprocess.call(command, shell=True, stdout=None)
-		return {'trackId': cropFile, 'track':track, 'proc_track':dets}
+		return {'trackId': cropFile.split('/')[-1], 'track':track, 'proc_track':dets}
 
 	def evaluate_network(self, files):
 		# GPU: active speaker detection by pretrained TalkNet
@@ -115,7 +115,7 @@ class TalkNetWrapper():
 					break
 			video.release()
 			videoFeature = numpy.array(videoFeature)
-			length = min((audioFeature.shape[0] - audioFeature.shape[0] % 4) / 100, videoFeature.shape[0])
+			length = min((audioFeature.shape[0] - audioFeature.shape[0] % 4) / 100.0, videoFeature.shape[0]/ 25.0)
 			audioFeature = audioFeature[:int(round(length * 100)),:]
 			videoFeature = videoFeature[:int(round(length * 25)),:,:]
 			allScore = [] # Evaluation use TalkNet
@@ -127,7 +127,7 @@ class TalkNetWrapper():
 						inputA = torch.FloatTensor(audioFeature[i * duration * 100:(i+1) * duration * 100,:]).unsqueeze(0).cuda()
 						inputV = torch.FloatTensor(videoFeature[i * duration * 25: (i+1) * duration * 25,:,:]).unsqueeze(0).cuda()
 						embedA = s.model.forward_audio_frontend(inputA)
-						embedV = s.model.forward_visual_frontend(inputV)	
+						embedV = s.model.forward_visual_frontend(inputV)
 						embedA, embedV = s.model.forward_cross_attention(embedA, embedV)
 						out = s.model.forward_audio_visual_backend(embedA, embedV)
 						score = s.lossAV.forward(out, labels = None)
@@ -186,7 +186,8 @@ class TalkNetWrapper():
 		if os.path.isfile(talknetScoresFile):
 			print('reading talknet scores from cache')
 			return pkl.load(open(talknetScoresFile, 'rb'))
-	
+
+		print('computing talknet scores')
 		frameFilePath = os.path.join(self.cacheDir, 'frames.pkl')
 		self.framesObj = pkl.load(open(frameFilePath, 'rb'))
 		faceCropDir = os.path.join(self.cacheDir, 'face_crop_videos')
@@ -199,7 +200,7 @@ class TalkNetWrapper():
 			)
 			for ii, track in tqdm.tqdm(enumerate(allTracks), total=len(allTracks), desc='video crops for TalkNet')
 		]
-		files = [os.path.join(track['trackId']) for track in vidTracks]
+		files = [os.path.join(faceCropDir, track['trackId']) for track in vidTracks]
 		scores = self.evaluate_network(files)
 		scores = self.faceWiseScores(vidTracks, scores)
 		writeToPickleFile(scores, talknetScoresFile)
