@@ -6,15 +6,21 @@ from TalkNet.talkNet import talkNet
 from src.local_utils import writeToPickleFile
 import python_speech_features
 import torch
+import numpy as np
 
 class TalkNetWrapper():
-	def __init__(self, videoPath, cacheDir):
+	def __init__(self, videoPath, cacheDir, framesObj=None):
 		self.videoPath = videoPath
 		self.cacheDir = cacheDir
 		self.cropScale = 0.25
 		self.audioFilePath = os.path.join(self.cacheDir, 'audio.wav')
 		self.nDataLoaderThread = 10
 		self.pretrainModel = '../TalkNet/pretrain_TalkSet.model'
+		if not framesObj:
+			frameFilePath = os.path.join(self.cacheDir, 'frames.pkl')
+			self.framesObj = pkl.load(open(frameFilePath, 'rb'))
+		else:
+			self.framesObj = framesObj
 		if os.path.isfile(self.pretrainModel) == False: # Download the pretrained model
 			Link = "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea"
 			cmd = "gdown --id %s -O %s"%(Link, self.pretrainModel)
@@ -39,9 +45,6 @@ class TalkNetWrapper():
 	def crop_video(self, track, cropFile):
 		# CPU: crop the face clips
 		allFrames = self.framesObj['frames']
-		vOut = cv2.VideoWriter(
-			f'{cropFile}t.avi', cv2.VideoWriter_fourcc(*'XVID'), self.framesObj['fps'], (224, 224)
-		)
 		dets = {'x':[], 'y':[], 's':[]}
 		for det in track['bbox']: # Read the tracks
 			dets['s'].append(max((det[3]-det[1]), (det[2]-det[0]))/2) 
@@ -50,6 +53,11 @@ class TalkNetWrapper():
 		dets['s'] = signal.medfilt(dets['s'], kernel_size=13)  # Smooth detections 
 		dets['x'] = signal.medfilt(dets['x'], kernel_size=13)
 		dets['y'] = signal.medfilt(dets['y'], kernel_size=13)
+		if os.path.isfile(f'{cropFile}.avi'):
+			return {'trackId': cropFile.split('/')[-1], 'track':track, 'proc_track':dets}
+		vOut = cv2.VideoWriter(
+			f'{cropFile}t.avi', cv2.VideoWriter_fourcc(*'XVID'), self.framesObj['fps'], (224, 224)
+		)
 		for fidx, frame in enumerate(track['frame']):
 			cs  = self.cropScale
 			bs  = dets['s'][fidx]   # Detection box size
@@ -85,7 +93,7 @@ class TalkNetWrapper():
 		# os.remove(f'{cropFile}tt.avi')
 		# #extract the audio file from 25fps
 		# command = f'ffmpeg -y -nostdin -loglevel error -i {cropFile}.avi \
-        #         -ar 16k -ac 1 {cropFile}.wav'
+		#         -ar 16k -ac 1 {cropFile}.wav'
 		# output = subprocess.call(command, shell=True, stdout=None)
 		return {'trackId': cropFile.split('/')[-1], 'track':track, 'proc_track':dets}
 
@@ -103,6 +111,10 @@ class TalkNetWrapper():
 			_, audio = wavfile.read(audioPath)
 			audioFeature = python_speech_features.mfcc(audio, 16000, numcep = 13, winlen = 0.025, winstep = 0.010)
 			video = cv2.VideoCapture(file + '.avi')
+			# check for the length of the video
+			if video.get(cv2.CAP_PROP_FRAME_COUNT) / video.get(cv2.CAP_PROP_FPS) < 0.4:
+				allScores.append('nan')
+				continue
 			videoFeature = []
 			while video.isOpened():
 				ret, frames = video.read()
@@ -172,6 +184,10 @@ class TalkNetWrapper():
 		faceScores = {}
 		for tidx, track in enumerate(tracks):
 			score = scores[tidx]
+			if score == 'nan':
+				track_scores = ['nan']*len(track)
+				faceScores[track['trackId']] = track_scores
+				continue
 			track_scores = []
 			for fidx, frame in enumerate(track['track']['frame']):
 				s = score[max(fidx - 2, 0): min(fidx + 3, len(score) - 1)] # average smoothing
@@ -180,16 +196,49 @@ class TalkNetWrapper():
 			faceScores[track['trackId']] = track_scores
 		return faceScores
 
+	def run_visualization(self, scores):
+		frames = self.framesObj['frames']
+		faceTracksFile = os.path.join(self.cacheDir, 'face_retinaFace.pkl')
+		faceTracks = pkl.load(open(faceTracksFile, 'rb'))
+		colorDict = {0: 0, 1: 255}
+		for faceTrackId, faceTrack in faceTracks.items():
+			for box, score in zip(faceTrack, scores[faceTrackId]):
+				frameNo = int(round(box[0]*self.framesObj['fps']))
+				if frameNo < len(frames):
+					x1 = int(round(box[1]*self.framesObj['width']))
+					y1 = int(round(box[2]*self.framesObj['height']))
+					x2 = int(round(box[3]*self.framesObj['width']))
+					y2 = int(round(box[4]*self.framesObj['height']))
+					clr = colorDict[int((score >= 0))] if not np.isnan(float(score)) else 0
+					cv2.rectangle(frames[frameNo], (x1, y1), (x2, y2), (0,clr,255-clr), 2)
+					# printing the name of the face track
+					cv2.putText(frames[frameNo], str(score), (x1, y1 - 10), \
+						cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+		videoSavePath = os.path.join(self.cacheDir, 'talknet_video_out.mp4')
+		video_writer = cv2.VideoWriter(videoSavePath, cv2.VideoWriter_fourcc(*'mp4v'), \
+								   self.framesObj['fps'], (int(self.framesObj['width']), int(self.framesObj['height'])))
+		for frame in frames:
+			video_writer.write(frame)
+		video_writer.release()
+		videoSavePathTmp = os.path.join(self.cacheDir, f'talknet_video_out_tmp.mp4')
+		wavPath = os.path.join(self.cacheDir, 'audio.wav')
+		audio_video_merge_cmd  = f'ffmpeg -loglevel error -i {videoSavePath} -i {wavPath} -c:v copy -c:a aac {videoSavePathTmp}'
+		subprocess.call(audio_video_merge_cmd, shell=True, stdout=False)
+		os.rename(f'{videoSavePathTmp}', videoSavePath)
+		print(f'talknet asd video saved at {videoSavePath}')
 
-	def run(self):
+	def run(self, visualization=False):
 		talknetScoresFile = os.path.join(self.cacheDir, 'talknet_scores.pkl')
 		if os.path.isfile(talknetScoresFile):
 			print('reading talknet scores from cache')
-			return pkl.load(open(talknetScoresFile, 'rb'))
+			scores = pkl.load(open(talknetScoresFile, 'rb'))
+			if visualization:
+				self.run_visualization(scores)
+			return scores
 
 		print('computing talknet scores')
-		frameFilePath = os.path.join(self.cacheDir, 'frames.pkl')
-		self.framesObj = pkl.load(open(frameFilePath, 'rb'))
+		# frameFilePath = os.path.join(self.cacheDir, 'frames.pkl')
+		# self.framesObj = pkl.load(open(frameFilePath, 'rb'))
 		faceCropDir = os.path.join(self.cacheDir, 'face_crop_videos')
 		os.makedirs(faceCropDir, exist_ok=True)
 		allTracks = self.readFaceTracks()
@@ -204,7 +253,8 @@ class TalkNetWrapper():
 		scores = self.evaluate_network(files)
 		scores = self.faceWiseScores(vidTracks, scores)
 		writeToPickleFile(scores, talknetScoresFile)
-		# self.visualization(vidTracks, scores)
+		if visualization:
+			self.run_visualization(scores)
 		return scores	
 		
 
