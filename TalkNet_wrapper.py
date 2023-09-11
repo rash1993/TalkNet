@@ -212,7 +212,7 @@ class TalkNetWrapper():
 					clr = colorDict[int((score >= 0))] if not np.isnan(float(score)) else 0
 					cv2.rectangle(frames[frameNo], (x1, y1), (x2, y2), (0,clr,255-clr), 2)
 					# printing the name of the face track
-					cv2.putText(frames[frameNo], str(score), (x1, y1 - 10), \
+					cv2.putText(frames[frameNo], f'{score:.2f}', (x1, y1 - 10), \
 						cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 		videoSavePath = os.path.join(self.cacheDir, 'talknet_video_out.mp4')
 		video_writer = cv2.VideoWriter(videoSavePath, cv2.VideoWriter_fourcc(*'mp4v'), \
