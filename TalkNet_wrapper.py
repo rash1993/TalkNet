@@ -26,9 +26,10 @@ class TalkNetWrapper():
 			cmd = "gdown --id %s -O %s"%(Link, self.pretrainModel)
 			subprocess.call(cmd, shell=True, stdout=None)
 
-	def readFaceTracks(self):
-		faceTracksFile = os.path.join(self.cacheDir, 'face_retinaFace.pkl')
-		faceTracks = pkl.load(open(faceTracksFile, 'rb'))
+	def readFaceTracks(self, faceTracks=None):
+		if not faceTracks:
+			faceTracksFile = os.path.join(self.cacheDir, 'face_retinaFace.pkl')
+			faceTracks = pkl.load(open(faceTracksFile, 'rb'))
 		allTracks = []
 		for faceTrackId, faceTrack in faceTracks.items():
 			frameNums = [int(round(face[0]*self.framesObj['fps'])) for face in faceTrack]
@@ -227,7 +228,7 @@ class TalkNetWrapper():
 		os.rename(f'{videoSavePathTmp}', videoSavePath)
 		print(f'talknet asd video saved at {videoSavePath}')
 
-	def run(self, visualization=False):
+	def run(self, faceTracks=None, visualization=False):
 		talknetScoresFile = os.path.join(self.cacheDir, 'talknet_scores.pkl')
 		if os.path.isfile(talknetScoresFile):
 			print('reading talknet scores from cache')
@@ -241,7 +242,7 @@ class TalkNetWrapper():
 		# self.framesObj = pkl.load(open(frameFilePath, 'rb'))
 		faceCropDir = os.path.join(self.cacheDir, 'face_crop_videos')
 		os.makedirs(faceCropDir, exist_ok=True)
-		allTracks = self.readFaceTracks()
+		allTracks = self.readFaceTracks(faceTracks)
 		vidTracks = [
 			self.crop_video(
 				track,
