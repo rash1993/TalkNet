@@ -182,10 +182,12 @@ class TalkNetWrapper():
 		output = subprocess.call(command, shell=True, stdout=None)
 
 	def faceWiseScores(self, tracks, scores):
+		# print('scores shape', np.array(scores).shape)
 		faceScores = {}
 		for tidx, track in enumerate(tracks):
 			score = scores[tidx]
-			if score == 'nan':
+			# print('score', score)
+			if isinstance(score, str) and (score== 'nan'):
 				track_scores = ['nan']*len(track)
 				faceScores[track['trackId']] = track_scores
 				continue
